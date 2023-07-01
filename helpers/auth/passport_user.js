@@ -23,11 +23,11 @@ function initialize(passport) {
                     if (isMatch) {
                         return done(null, user);
                     } else {
-                        return done(null, false, { message: 'Pogrešna lozinka.' });
+                        return done(null, false, {message: 'Pogrešna lozinka.'});
                     }
                 });
             } else {
-                return done(null, false, { message: 'Email nije registrovan.' });
+                return done(null, false, {message: 'Email nije registrovan.'});
             }
         });
     };
