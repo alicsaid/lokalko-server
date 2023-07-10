@@ -26,10 +26,12 @@ function initialize(passport) {
                     if (isMatch) {
                         return done(null, user);
                     } else {
+                        console.log('Password incorrect!')
                         return done(null, false, {message: 'Password incorrect!'});
                     }
                 })
             } else {
+                console.log('Email not registered!')
                 return done(null, false, {message: 'Email not registered!'});
             }
         })
