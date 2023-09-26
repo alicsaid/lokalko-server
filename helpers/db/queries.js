@@ -2,6 +2,7 @@ var pg = require('pg');
 var dbConnection = require('./db_connection');
 const moment = require('moment');
 const {hashSync} = require("bcrypt");
+const {decodeAccessToken} = require("../auth/jwt_auth");
 
 var pool = new pg.Pool(dbConnection);
 
@@ -18,7 +19,7 @@ exports.register = (req, res, next) => {
         last_name: req.body.lastName
     }
 
-    console.info(data, req.body.password);
+    console.info(data);
 
     pool.connect(function (err, client, done) {
         if (err) {
@@ -34,7 +35,7 @@ exports.register = (req, res, next) => {
             if (result.rows.length > 0) {
                 // Grad već postoji, koristimo postojeći city_id
                 const cityId = result.rows[0].city_id;
-                insertUser(client, done, data, cityId, res, next);
+                insertUser(client, done, data, cityId, req, res, next);
             } else {
                 // Grad ne postoji, prvo dodajemo grad
                 client.query('INSERT INTO cities (city) VALUES ($1) RETURNING city_id;', [data.city], function (err, result) {
@@ -44,7 +45,7 @@ exports.register = (req, res, next) => {
                     }
 
                     const cityId = result.rows[0].city_id;
-                    insertUser(client, done, data, cityId, res, next);
+                    insertUser(client, done, data, cityId, req, res, next);
                 });
             }
         });
@@ -52,18 +53,31 @@ exports.register = (req, res, next) => {
 };
 
 /* POST register II */
-const insertUser = (client, done, data, cityId, res, next) => {
-    client.query('INSERT INTO users (email, password, city_id, first_name, last_name) VALUES ($1, $2, $3, $4, $5);', [data.email, data.password, cityId, data.first_name, data.last_name], function (err, result) {
+const insertUser = (client, done, data, cityId, req, res, next) => {
+    client.query('INSERT INTO users (email, password, city_id, first_name, last_name) VALUES ($1, $2, $3, $4, $5) RETURNING user_id;', [data.email, data.password, cityId, data.first_name, data.last_name], function (err, result) {
         done();
 
         if (err) {
             if (err.code === '23505' && err.constraint === 'users_email_key') {
-                //console.info('check email');
-                return {message: ('Email address already exists. Try another one!')};
+                console.info('check email');
+                return res.sendStatus(409)
             } else {
-                return res.send(err);
+                console.error(err);
+                return res.sendStatus(500)
             }
         }
+
+        //req.email = data.email
+
+        req.user = {
+            user_id : result.rows[0].user_id,
+            email : data.email,
+            password : data.password,
+            city_id : data.city_id,
+            first_name : data.first_name,
+            last_name : data.last_name
+        }
+
         next();
     });
 };
@@ -95,13 +109,16 @@ exports.getRequestsAnalytics = (req, res, next) => {
 
 /* GET requests */
 exports.getRequestsAnalyticsByUser = (req, res, next) => {
+
+    console.log("TOKEN", req.token)
+
     pool.connect(function (err, client, done) {
         if (err) {
             return res.send(err);
         }
 
         client.query(`SELECT COUNT(*) AS totalRequests FROM requests WHERE user_id = $1;`,
-            [req.query.user_id],
+            [req.token.user_id],
             function (err, result) {
                 done();
 
@@ -109,8 +126,55 @@ exports.getRequestsAnalyticsByUser = (req, res, next) => {
                     return res.send(err);
                 }
                 //console.info(result.rows)
-                const totalRequests = parseInt(result.rows[0].totalrequests);
-                req.totalRequests = totalRequests;
+                req.totalRequests = parseInt(result.rows[0].totalrequests);
+                next();
+            }
+        );
+    });
+};
+
+
+/* GET reportedIssues */
+exports.getReportedIssues = (req, res, next) => {
+    pool.connect(function (err, client, done) {
+        if (err) {
+            return res.send(err);
+        }
+
+        client.query(`SELECT COUNT(*) AS reportedIssues FROM requests;`,
+            [],
+            function (err, result) {
+                done();
+
+                if (err) {
+                    return res.send(err);
+                }
+                //console.info(result.rows[0]);
+                req.reportedIssues = parseInt(result.rows[0].reportedissues);
+                next();
+            }
+        );
+    });
+};
+
+
+/* GET resolvedIssues */
+exports.getResolvedIssues = (req, res, next) => {
+    pool.connect(function (err, client, done) {
+        if (err) {
+            return res.send(err);
+        }
+
+        client.query(`SELECT COUNT(*) AS resolvedIssues FROM requests WHERE status_id = $1;`,
+            [3],
+            function (err, result) {
+                done();
+
+                if (err) {
+                    return res.send(err);
+                }
+                //console.info(result.rows[0])
+                req.resolvedIssues = parseInt(result.rows[0].resolvedissues);
                 next();
             }
         );
@@ -176,7 +240,7 @@ exports.getAllRequests = (req, res, next) => {
             return res.send(err);
         }
         client.query(`
-            SELECT r.request_id, r.title, r.description, r.date, r.time, r.image, r.address, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
+            SELECT r.request_id, r.title, r.description, r.date, r.time, r.address, r.latitude, r.longitude, c.city AS city, rc.category AS category, rc.category_id AS category_id, u.email, s.severity AS severity, s.severity_id AS severity_id, se.service AS service, se.service_id AS service_id, st.status AS status, st.status_id AS status_id
                 FROM requests r 
                 LEFT JOIN cities c ON r.city_id = c.city_id 
                 LEFT JOIN request_categories rc ON r.category_id = rc.category_id 
@@ -252,6 +316,7 @@ exports.updateRequest = (req, res, next) => {
                 if (err) {
                     return res.send(err);
                 }
+
                 next();
             }
         );
@@ -284,7 +349,7 @@ exports.getRequestById = (req, res, next) => {
             return res.send(err);
         }
         client.query(`
-            SELECT r.request_id, r.title, r.description, r.date, r.time, r.image, r.address, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
+            SELECT r.request_id, r.title, r.description, r.date, r.time, r.address, r.latitude, r.longitude, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
                 FROM requests r 
                 JOIN cities c ON r.city_id = c.city_id 
                 JOIN request_categories rc ON r.category_id = rc.category_id 
@@ -293,7 +358,7 @@ exports.getRequestById = (req, res, next) => {
                 JOIN services se ON r.service_id = se.service_id 
                 JOIN status st ON r.status_id = st.status_id
                 WHERE r.request_id = $1;
-        `, [req.params.request_id], function (err, result) {
+        `, [req.query.request_id], function (err, result) {
             done()
 
             if (err) {
@@ -307,7 +372,7 @@ exports.getRequestById = (req, res, next) => {
                 time: moment(row.time, 'HH:mm:ss').format('HH:mm')
             }));
 
-            req.request = formattedRequests;
+            req.request = formattedRequests[0];
             console.log(req.request)
             next();
         });
@@ -322,7 +387,7 @@ exports.getRequestsByUser = (req, res, next) => {
             return res.send(err);
         }
         client.query(`
-            SELECT r.request_id, r.title, r.description, r.date, r.time, r.image, r.address, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
+            SELECT r.request_id, r.title, r.description, r.date, r.time, r.address, r.latitude, r.longitude, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
                 FROM requests r 
                 LEFT JOIN cities c ON r.city_id = c.city_id 
                 LEFT JOIN request_categories rc ON r.category_id = rc.category_id 
@@ -332,7 +397,7 @@ exports.getRequestsByUser = (req, res, next) => {
                 LEFT JOIN status st ON r.status_id = st.status_id
                 WHERE u.user_id = $1
                 ORDER BY r.date;
-        `, [req.params.user_id], function (err, result) {
+        `, [req.token.user_id], function (err, result) {
             done()
 
             if (err) {
@@ -353,6 +418,30 @@ exports.getRequestsByUser = (req, res, next) => {
     });
 };
 
+/* GET city */
+exports.getCityData = (req, res, next) => {
+
+    pool.connect(function (err, client, done) {
+        if (err) {
+            return res.send(err);
+        }
+        client.query(`
+            SELECT * from cities WHERE city_id = $1
+        `, [req.token.city_id], function (err, result) {
+            done()
+
+            if (err) {
+                return res.send(err);
+            }
+
+            req.city = result.rows[0];
+            //console.info(req.city);
+            next();
+        });
+    });
+};
+
+
 /* GET requests */
 exports.getRequestsByCity = (req, res, next) => {
 
@@ -361,7 +450,7 @@ exports.getRequestsByCity = (req, res, next) => {
             return res.send(err);
         }
         client.query(`
-            SELECT r.request_id, r.title, r.description, r.date, r.time, r.image, r.address, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
+            SELECT r.request_id, r.title, r.description, r.date, r.time, r.address, r.latitude, r.longitude, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
                 FROM requests r 
                 LEFT JOIN cities c ON r.city_id = c.city_id 
                 LEFT JOIN request_categories rc ON r.category_id = rc.category_id 
@@ -371,7 +460,7 @@ exports.getRequestsByCity = (req, res, next) => {
                 LEFT JOIN status st ON r.status_id = st.status_id
                 WHERE c.city_id = $1
                 ORDER BY r.date;
-        `, [req.params.city_id], function (err, result) {
+        `, [req.token.city_id], function (err, result) {
             done()
 
             if (err) {
@@ -398,26 +487,30 @@ exports.postRequest = (req, res, next) => {
     var data = {
         title: req.body.title,
         description: req.body.description,
-        date: new Date().toLocaleDateString(),
-        time: new Date().toLocaleTimeString(),
+        date: moment().format('YYYY-MM-DD'),
+        time: moment().format('HH:mm:ss'),
+        // date: new Date().toLocaleDateString(),
+        // time: new Date().toLocaleTimeString(),
         address: req.body.address,
-        image: "test",
         city_id: req.body.city_id,
         category_id: req.body.category_id,
-        user_id: 1,
+        user_id: req.token.user_id,
         severity_id: req.body.severity_id,
-        service_id: "",
-        status_id: 1
+        service_id: 22,
+        status_id: 1,
+        archived: false,
+        latitude: req.body.latitude,
+        longitude: req.body.longitude
     }
 
-    console.info(data);
+    console.info(req.body);
 
     pool.connect(function (err, client, done) {
         if (err) {
             return res.send(err);
         }
 
-        client.query(`insert into requests(title, description, date, time, image, address, city_id, category_id, user_id, severity_id, service_id, status_id) values($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`, [data.title, data.description, data.date, data.time, data.image, data.address, data.city_id, data.category_id, data.user_id, data.severity_id, data.service_id, data.status_id], function (err, result) {
+        client.query(`insert into requests(title, description, date, time, address, city_id, category_id, user_id, severity_id, service_id, status_id, archived, latitude, longitude) values($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);`, [data.title, data.description, data.date, data.time, data.address, data.city_id, data.category_id, data.user_id, data.severity_id, data.service_id, data.status_id, data.archived, data.latitude, data.longitude], function (err, result) {
             done()
 
             if (err) {
@@ -504,7 +597,7 @@ exports.getAllArchivedRequests = (req, res, next) => {
             return res.send(err);
         }
         client.query(`
-            SELECT r.request_id, r.title, r.description, r.date, r.time, r.image, r.address, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
+            SELECT r.request_id, r.title, r.description, r.date, r.time, r.address, r.latitude, r.longitude, c.city AS city, rc.category AS category, u.email, s.severity AS severity, se.service AS service, st.status AS status 
                 FROM requests r 
                 LEFT JOIN cities c ON r.city_id = c.city_id 
                 LEFT JOIN request_categories rc ON r.category_id = rc.category_id 
@@ -562,7 +655,7 @@ exports.getAllUsers = (req, res, next) => {
 /* GET user */
 exports.getUserData = (req, res, next) => {
 
-    userId = req.params.user_id;
+    userId = req.token.user_id;
 
     pool.connect(function (err, client, done) {
         if (err) {
@@ -580,7 +673,15 @@ exports.getUserData = (req, res, next) => {
                 return res.send(err);
             }
 
-            req.userData = result.rows[0]
+            req.userData = result.rows[0] = {
+                user_id: result.rows[0].user_id,
+                email: result.rows[0].email,
+                city_id: result.rows[0].city_id,
+                first_name: result.rows[0].first_name,
+                last_name: result.rows[0].last_name,
+                city: result.rows[0].city
+            }
+
             console.info(req.userData);
             next();
         });
@@ -589,8 +690,11 @@ exports.getUserData = (req, res, next) => {
 
 /* PUT user I */
 exports.updateUser = (req, res, next) => {
-    const { userId } = req.params;
-    const { first_name, last_name, city, email } = req.body;
+    const {user_id} = req.token;
+    const {first_name, last_name, city, email} = req.body;
+
+    console.log(req.query)
+    console.log(req.body)
 
     pool.connect((err, client, done) => {
         if (err) {
@@ -607,7 +711,7 @@ exports.updateUser = (req, res, next) => {
             if (result.rows.length > 0) {
                 // City exists, use the existing city_id
                 const cityId = result.rows[0].city_id;
-                updateUserWithCityId(client, done, userId, first_name, last_name, cityId, email, res, next);
+                updateUserWithCityId(client, done, user_id, first_name, last_name, cityId, email, res, next);
             } else {
                 // City does not exist, insert it into the cities table
                 insertCity(client, done, city, (err, cityId) => {
@@ -616,7 +720,7 @@ exports.updateUser = (req, res, next) => {
                         return res.send(err);
                     }
 
-                    updateUserWithCityId(client, done, userId, first_name, last_name, cityId, email, res, next);
+                    updateUserWithCityId(client, done, user_id, first_name, last_name, cityId, email, res, next);
                 });
             }
         });
@@ -624,10 +728,13 @@ exports.updateUser = (req, res, next) => {
 };
 
 /* PUT user II */
-const updateUserWithCityId = (client, done, userId, first_name, last_name, cityId, email, res, next) => {
-    const query = `UPDATE users SET first_name = $1, last_name = $2, city_id = $3, email = $4 WHERE userId = $5;`;
+const updateUserWithCityId = (client, done, user_id, first_name, last_name, cityId, email, res, next) => {
 
-    const values = [first_name, last_name, cityId, email, userId];
+    console.log(user_id, first_name, last_name, cityId, email)
+
+    const query = `UPDATE users SET email = $4, city_id = $3, first_name = $1, last_name = $2 WHERE user_id = $5;`;
+
+    const values = [first_name, last_name, cityId, email, user_id];
 
     client.query(query, values, (err, result) => {
         done();
@@ -771,21 +878,47 @@ exports.updateService = (req, res, next) => {
             return res.send(err);
         }
 
-        const query = `UPDATE services SET service = $1, address = $2, city = $3, telephone = $4 WHERE service_id = $5;`;
-
-        const values = [service, address, city, telephone, serviceId];
-
-        client.query(query, values, (err, result) => {
-            done();
-
+        client.query('SELECT city_id FROM cities WHERE city = $1;', [city], (err, result) => {
             if (err) {
+                done();
                 return res.send(err);
             }
 
-            next();
+            if (result.rows.length > 0) {
+                // City already exists, use the existing city_id
+                const cityId = result.rows[0].city_id;
+                updateService2(client, done, serviceId, service, address, cityId, telephone, res, next);
+            } else {
+                // City does not exist, insert the city first
+                client.query('INSERT INTO cities (city) VALUES ($1) RETURNING city_id;', [city], (err, result) => {
+                    if (err) {
+                        done();
+                        return res.send(err);
+                    }
+
+                    const cityId = result.rows[0].city_id;
+                    updateService2(client, done, serviceId, service, address, cityId, telephone, res, next);
+                });
+            }
         });
     });
 };
+
+const updateService2 = (client, done, serviceId, service, address, cityId, telephone, res, next,) => {
+    const query = `UPDATE services SET service = $1, address = $2, city_id = $3, telephone = $4 WHERE service_id = $5;`;
+
+    const values = [service, address, cityId, telephone, serviceId];
+
+    client.query(query, values, (err, result) => {
+        done();
+
+        if (err) {
+            return res.send(err);
+        }
+
+        next();
+    });
+}
 
 /* DELETE service */
 exports.deleteService = (req, res, next) => {

@@ -3,8 +3,6 @@ var createError = require('http-errors');
 var path = require('path');
 var cookieParser = require('cookie-parser');
 var logger = require('morgan');
-var session = require('express-session');
-var passport = require('passport');
 
 var indexRouter = require('./routes/index');
 var adminRouter = require('./routes/admin');
@@ -17,17 +15,6 @@ app.use(express.json());
 app.use(express.urlencoded({extended: false}));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
-
-/* sessions */
-app.use(session({
-    secret: 'verygoodsecret',
-    resave: false,
-    saveUninitialized: false
-}));
-
-/* passport */
-app.use(passport.initialize());
-app.use(passport.session());
 
 /* routes */
 app.use('/', indexRouter);
